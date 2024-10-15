@@ -6,8 +6,11 @@ import jakarta.xml.bind.JAXBContext;
 import jakarta.xml.bind.JAXBException;
 import jakarta.xml.bind.Unmarshaller;
 import org.cassandrabase.lite.entity.ChangelogLockEntity;
+import org.cassandrabase.lite.exception.CassandrabaseException;
+import org.cassandrabase.lite.exception.ChangeLogAlreadyExistException;
 import org.cassandrabase.lite.model.CassandraConfigs;
 import org.cassandrabase.lite.repository.ChangelogLockRepository;
+import org.cassandrabase.lite.types.ChangeLogOrder;
 import org.cassandrabase.lite.util.HashGen;
 import org.cassandrabase.lite.xml.CassandraBaseConfig;
 import org.cassandrabase.lite.xml.ChangeLog;
@@ -23,9 +26,7 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Comparator;
-import java.util.List;
-import java.util.StringJoiner;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class Cassandrabase implements Closeable {
@@ -35,25 +36,69 @@ public final class Cassandrabase implements Closeable {
     private final String identifier;
     private final ChangelogLockRepository changelogLockRepository;
     private final AtomicBoolean updated = new AtomicBoolean(false);
-    private final String md5Key;
+    private String md5Key;
     private final Object classObject;
 
-    public Cassandrabase(CqlSession cqlSession, String identifier, Object classObject) throws SAXException, IOException {
-        this.classObject = classObject;
-        this.cqlSession = cqlSession;
-        this.identifier = identifier;
-        this.changelogLockRepository = new ChangelogLockRepository(this.cqlSession);
-        this.cassandraConfigs = this.getPrimaryChangeLog();
-        List<ChangeSet> orderedChangeSets = cassandraConfigs.getPreChangeLog().getChangeSets().stream().sorted(Comparator.comparing(ChangeSet::getOrder)).toList();
-        final StringJoiner keyAsString = new StringJoiner("#");
-        for (ChangeSet changeSet : orderedChangeSets) {
-            keyAsString.add(changeSet.getMd5Sum());
+    public Cassandrabase(CqlSession cqlSession, String identifier, Object classObject) throws CassandrabaseException {
+        try {
+            this.classObject = classObject;
+            this.cqlSession = cqlSession;
+            this.identifier = identifier;
+            this.changelogLockRepository = new ChangelogLockRepository(this.cqlSession);
+            this.cassandraConfigs = this.getPrimaryChangeLog();
+        } catch (SAXException e) {
+            throw new CassandrabaseException(e);
         }
-        this.md5Key = HashGen.generateHash(keyAsString.toString(), HashGen.ALGType.MD5);
-        log.info("Major version Key (MD5): {}", md5Key);
     }
 
+    private ChangeLog dynamicBeforeChangeLog;
+    private ChangeLog dynamiAfterChangeLog;
+
+    public void addDynamicChangeLog(ChangeLog dynamicChangeLog, ChangeLogOrder changeLogOrder) {
+        if (changeLogOrder.equals(ChangeLogOrder.BEFORE_STATIC_CHANGE_LOG)) {
+            if (Objects.isNull(this.dynamicBeforeChangeLog)) {
+                this.dynamicBeforeChangeLog = dynamicChangeLog;
+            } else {
+                throw new ChangeLogAlreadyExistException("Before-DynamicChangeLog already has been set.");
+            }
+        }
+        if (changeLogOrder.equals(ChangeLogOrder.AFTER_STATIC_CHANGE_LOG)) {
+            if (Objects.isNull(this.dynamiAfterChangeLog)) {
+                this.dynamiAfterChangeLog = dynamicChangeLog;
+            } else {
+                throw new ChangeLogAlreadyExistException("After-DynamicChangeLog already has been set.");
+            }
+        }
+    }
+
+
+    private Runnable runnableBefore;
+
+    public void runBefore(Runnable runnableBefore) {
+        this.runnableBefore = runnableBefore;
+    }
+
+    private Runnable runnableAfter;
+
+    public void runAfter(Runnable runnableAfter) {
+        this.runnableAfter = runnableAfter;
+    }
+
+
     private void init() {
+        List<ChangeSet> orderedChangeSetsPre = cassandraConfigs.getPreChangeLog().getChangeSets().stream().sorted(Comparator.comparing(ChangeSet::getOrder)).toList();
+        List<ChangeSet> orderedChangeSets = cassandraConfigs.getChangeLog().getChangeSets().stream().sorted(Comparator.comparing(ChangeSet::getOrder)).toList();
+        final StringJoiner keyAsString = new StringJoiner("#");
+        orderedChangeSetsPre.stream().map(ChangeSet::getMd5Sum).forEach(keyAsString::add);
+        Optional.ofNullable(this.dynamicBeforeChangeLog).ifPresent(changeLog -> {
+            changeLog.getChangeSets().forEach(changeSet -> keyAsString.add(changeSet.getMd5Sum()));
+        });
+        orderedChangeSets.stream().map(ChangeSet::getMd5Sum).forEach(keyAsString::add);
+        Optional.ofNullable(this.dynamiAfterChangeLog).ifPresent(changeLog -> {
+            changeLog.getChangeSets().forEach(changeSet -> keyAsString.add(changeSet.getMd5Sum()));
+        });
+        this.md5Key = HashGen.generateHash(keyAsString.toString(), HashGen.ALGType.MD5);
+        log.info("Major version Key (MD5): {}", md5Key);
         if (!this.changelogLockRepository.tableExists()) {
             this.cassandraConfigs.getPreChangeLog()
                     .getChangeSets()
@@ -95,7 +140,27 @@ public final class Cassandrabase implements Closeable {
         this.init();
         if (this.updated.get()) {
             log.info("Start applying changes...");
+            if (Objects.nonNull(this.dynamicBeforeChangeLog)) {
+                this.saveChangeLog(this.dynamicBeforeChangeLog);
+            } else {
+                log.debug("No dynamic changeLog found for updating before static changeLog.");
+            }
+            if (Objects.nonNull(this.runnableBefore)) {
+                this.runnableBefore.run();
+            } else {
+                log.debug("No runnable for updating before static changeLog.");
+            }
             this.saveChangeLog(this.cassandraConfigs.getChangeLog());
+            if (Objects.nonNull(this.dynamiAfterChangeLog)) {
+                this.saveChangeLog(this.dynamiAfterChangeLog);
+            } else {
+                log.debug("Not dynamic changeLog found for updating after static changeLog.");
+            }
+            if (Objects.nonNull(this.runnableAfter)) {
+                this.runnableBefore.run();
+            } else {
+                log.debug("No runnable for updating after static changeLog.");
+            }
         }
     }
 
@@ -107,10 +172,6 @@ public final class Cassandrabase implements Closeable {
         SimpleStatement simpleStatement = SimpleStatement.newInstance(changeSet.getStatement()).setConsistencyLevel(changeSet.getConsistencyLevel());
         log.info("Updating Change log. [ChangeLogId: {}, Author : {}, Order : {}, RowKey : {}]", changeSet.getId(), changeSet.getAuthor(), changeSet.getOrder(), changeSet.getMd5Sum());
         cqlSession.execute(simpleStatement);
-    }
-
-    private File buildChangeLogPath(String[] paths) {
-        return Paths.get("src/main/resources/db", paths).toFile();
     }
 
     private CassandraConfigs getPrimaryChangeLog() throws SAXException {
