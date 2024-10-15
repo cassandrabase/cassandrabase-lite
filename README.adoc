@@ -1,0 +1,3 @@
+= Cassandrabase Lite
+
+Cassandrabase is a low-level database migration tool for CassandraDB.

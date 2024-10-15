@@ -1,0 +1,21 @@
+package org.cassandrabase.lite.xml;
+
+import jakarta.xml.bind.annotation.XmlElement;
+import jakarta.xml.bind.annotation.XmlRootElement;
+
+import java.util.List;
+
+@XmlRootElement(name = "changeLog")
+public class ChangeLog {
+
+    private List<ChangeSet> changeSets;
+
+    public List<ChangeSet> getChangeSets() {
+        return changeSets;
+    }
+
+    @XmlElement(name = "changeSet", type = ChangeSet.class)
+    public void setChangeSets(List<ChangeSet> changeSets) {
+        this.changeSets = changeSets;
+    }
+}
