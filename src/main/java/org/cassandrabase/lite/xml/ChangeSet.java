@@ -97,4 +97,16 @@ public class ChangeSet {
     public void setRollbackStatement(String rollbackStatement) {
         this.rollbackStatement = rollbackStatement;
     }
+    @Override
+    public int hashCode() {
+        return Objects.hash(order);
+    }
+    @Override
+    public boolean equals(Object obj) {
+        if (obj instanceof ChangeSet changeSet) {
+            return Objects.equals(changeSet.getOrder(), this.getOrder());
+        } else {
+            throw new RuntimeException("Object is not a ChangeSet");
+        }
+    }
 }

@@ -3,12 +3,13 @@ package org.cassandrabase.lite.xml;
 import jakarta.xml.bind.annotation.XmlElement;
 import jakarta.xml.bind.annotation.XmlRootElement;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @XmlRootElement(name = "changeLog")
 public class ChangeLog {
 
-    private List<ChangeSet> changeSets;
+    private List<ChangeSet> changeSets = new ArrayList<>();
 
     public List<ChangeSet> getChangeSets() {
         return changeSets;

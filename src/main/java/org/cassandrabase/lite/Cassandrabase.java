@@ -5,6 +5,7 @@ import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import jakarta.xml.bind.JAXBContext;
 import jakarta.xml.bind.JAXBException;
 import jakarta.xml.bind.Unmarshaller;
+import org.apache.commons.text.StringSubstitutor;
 import org.cassandrabase.lite.entity.ChangelogLockEntity;
 import org.cassandrabase.lite.exception.CassandrabaseException;
 import org.cassandrabase.lite.exception.ChangeLogAlreadyExistException;
@@ -38,12 +39,18 @@ public final class Cassandrabase implements Closeable {
     private final AtomicBoolean updated = new AtomicBoolean(false);
     private String md5Key;
     private final Object classObject;
+    private final Properties properties;
 
     public Cassandrabase(CqlSession cqlSession, String identifier, Object classObject) throws CassandrabaseException {
+        this(cqlSession, identifier, classObject, new Properties());
+    }
+
+    public Cassandrabase(CqlSession cqlSession, String identifier, Object classObject, Properties properties) throws CassandrabaseException {
         try {
             this.classObject = classObject;
             this.cqlSession = cqlSession;
             this.identifier = identifier;
+            this.properties = properties;
             this.changelogLockRepository = new ChangelogLockRepository(this.cqlSession);
             this.cassandraConfigs = this.getPrimaryChangeLog();
         } catch (SAXException e) {
@@ -213,12 +220,14 @@ public final class Cassandrabase implements Closeable {
             {
                 final JAXBContext jaxbContext = JAXBContext.newInstance(ChangeLog.class);
                 final Unmarshaller jaxbUnmarshaller = jaxbContext.createUnmarshaller();
+                cassandraConfigs.setPreChangeLog(new ChangeLog());
                 try (final InputStream changeLogFileStream = this.classObject.getClass().getClassLoader().getResourceAsStream("db/" + preChangeLogFile)) {
                     final ChangeLog preChangeLog = (ChangeLog) jaxbUnmarshaller.unmarshal(changeLogFileStream);
                     cassandraConfigs.setPreChangeLog(preChangeLog);
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
+                cassandraConfigs.setChangeLog(new ChangeLog());
                 try (final InputStream changeLogFileStream = this.classObject.getClass().getClassLoader().getResourceAsStream("db/" + changeLogFile)) {
                     final ChangeLog changeLog = (ChangeLog) jaxbUnmarshaller.unmarshal(changeLogFileStream);
                     cassandraConfigs.setChangeLog(changeLog);
@@ -226,10 +235,53 @@ public final class Cassandrabase implements Closeable {
                     throw new RuntimeException(e);
                 }
             }
+            this.validate(cassandraConfigs);
+            this.setProperties(cassandraConfigs);
             return cassandraConfigs;
         } catch (JAXBException | IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private void validate(CassandraConfigs cassandraConfigs) {
+        {
+            HashSet<ChangeSet> changeSetsByOrder = new HashSet<>();
+            HashSet<ChangeSet> changeSetsById = new HashSet<>();
+            cassandraConfigs.getPreChangeLog().getChangeSets().forEach(changeSet -> {
+                if (!changeSetsByOrder.add(changeSet)) {
+                    throw new RuntimeException("Duplicate changeSet found in preChangeLog. [Order : " + changeSet.getOrder() + "]");
+                }
+                if (!changeSetsById.add(changeSet)) {
+                    throw new RuntimeException("Duplicate changeSet found in preChangeLog. [ChangeSetId : " + changeSet.getId() + "]");
+                }
+            });
+        }
+        {
+            HashSet<ChangeSet> changeSetsByOrder = new HashSet<>();
+            HashSet<ChangeSet> changeSetsById = new HashSet<>();
+            cassandraConfigs.getChangeLog().getChangeSets().forEach(changeSet -> {
+                if (!changeSetsByOrder.add(changeSet)) {
+                    throw new RuntimeException("Duplicate changeSet found in post changeLog. [Order : " + changeSet.getOrder() + "]");
+                }
+                if (!changeSetsById.add(changeSet)) {
+                    throw new RuntimeException("Duplicate changeSet found in post changeLog. [ChangeSetId : " + changeSet.getId() + "]");
+                }
+            });
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void setProperties(CassandraConfigs cassandraConfigs) {
+        cassandraConfigs.getChangeLog().getChangeSets().forEach(changeSet -> {
+            StringSubstitutor sub = new StringSubstitutor((Map) this.properties);
+            String updatedStatement = sub.replace(changeSet.getStatement());
+            changeSet.setStatement(updatedStatement);
+        });
+        cassandraConfigs.getPreChangeLog().getChangeSets().forEach(changeSet -> {
+            StringSubstitutor sub = new StringSubstitutor((Map) this.properties);
+            String updatedStatement = sub.replace(changeSet.getStatement());
+            changeSet.setStatement(updatedStatement);
+        });
     }
 
     @Override
