@@ -30,7 +30,6 @@ public class ChangelogLockRepository implements ChangelogLockEntity.Keys {
                 .value(LOCKED, QueryBuilder.literal(true))
                 .value(LOCK_TIME, QueryBuilder.literal(Instant.now()))
                 .value(LOCKED_BY, QueryBuilder.literal(identifier))
-                .ifNotExists()
                 .build();
         log.debug("ChangelogLockRepository:acquireLock:{}", acquireLockQuery.getQuery());
         return cqlSession
