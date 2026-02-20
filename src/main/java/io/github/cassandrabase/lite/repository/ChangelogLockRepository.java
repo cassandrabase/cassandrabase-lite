@@ -39,20 +39,22 @@ public class ChangelogLockRepository implements ChangelogLockEntity.Keys {
 
 
     public boolean releaseLock(String lockId, Integer majorVersion, String identifier) {
-        SimpleStatement acquireLockQuery = QueryBuilder
-                .update(TABLE_NAME)
-                .setColumn(LOCKED, QueryBuilder.literal(false))
-                .whereColumn(ID)
-                .isEqualTo(QueryBuilder.literal(lockId))
-                .whereColumn(MAJOR_VERSION)
-                .isEqualTo(QueryBuilder.literal(majorVersion))
-                .ifColumn(LOCKED)
-                .isEqualTo(QueryBuilder.literal(true))
-                .build();
-        log.debug("ChangelogLockRepository:releaseLock:{}", acquireLockQuery.getQuery());
-        return cqlSession
-                .execute(acquireLockQuery)
-                .wasApplied();
+//        SimpleStatement acquireLockQuery = QueryBuilder
+//                .update(TABLE_NAME)
+//                .setColumn(LOCKED, QueryBuilder.literal(false))
+//                .whereColumn(ID)
+//                .isEqualTo(QueryBuilder.literal(lockId))
+//                .whereColumn(MAJOR_VERSION)
+//                .isEqualTo(QueryBuilder.literal(majorVersion))
+//                .whereColumn(LOCKED)
+//                .isEqualTo(QueryBuilder.literal(true))
+//                .build();
+        //todo: 2/3/2026 4:00 PM temporally disabled
+//        log.debug("ChangelogLockRepository:releaseLock:{}", acquireLockQuery.getQuery());
+//        return cqlSession
+//                .execute(acquireLockQuery)
+//                .wasApplied();
+        return true;
     }
 
     public ChangelogLockEntity getByLockId(String md5Key, Integer majorVersion) {

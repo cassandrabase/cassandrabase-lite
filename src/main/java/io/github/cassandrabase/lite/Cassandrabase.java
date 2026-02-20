@@ -1,11 +1,8 @@
 package io.github.cassandrabase.lite;
 
 import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.AsyncResultSet;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
-import jakarta.xml.bind.JAXBContext;
-import jakarta.xml.bind.JAXBException;
-import jakarta.xml.bind.Unmarshaller;
-import org.apache.commons.text.StringSubstitutor;
 import io.github.cassandrabase.lite.entity.ChangelogLockEntity;
 import io.github.cassandrabase.lite.exception.CassandrabaseException;
 import io.github.cassandrabase.lite.exception.ChangeLogAlreadyExistException;
@@ -16,6 +13,10 @@ import io.github.cassandrabase.lite.util.HashGen;
 import io.github.cassandrabase.lite.xml.CassandraBaseConfig;
 import io.github.cassandrabase.lite.xml.ChangeLog;
 import io.github.cassandrabase.lite.xml.ChangeSet;
+import jakarta.xml.bind.JAXBContext;
+import jakarta.xml.bind.JAXBException;
+import jakarta.xml.bind.Unmarshaller;
+import org.apache.commons.text.StringSubstitutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xml.sax.SAXException;
@@ -28,6 +29,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class Cassandrabase implements Closeable {
@@ -92,7 +95,7 @@ public final class Cassandrabase implements Closeable {
     }
 
 
-    private void init() {
+    private void init(boolean isAsync) {
         List<ChangeSet> orderedChangeSetsPre = cassandraConfigs.getPreChangeLog().getChangeSets().stream().sorted(Comparator.comparing(ChangeSet::getOrder)).toList();
         List<ChangeSet> orderedChangeSets = cassandraConfigs.getChangeLog().getChangeSets().stream().sorted(Comparator.comparing(ChangeSet::getOrder)).toList();
         final StringJoiner keyAsString = new StringJoiner("#");
@@ -107,11 +110,31 @@ public final class Cassandrabase implements Closeable {
         this.md5Key = HashGen.generateHash(keyAsString.toString(), HashGen.ALGType.MD5);
         log.info("Major version Key (MD5): {}", md5Key);
         if (!this.changelogLockRepository.tableExists()) {
-            this.cassandraConfigs.getPreChangeLog()
-                    .getChangeSets()
-                    .stream()
-                    .sorted(Comparator.comparing(ChangeSet::getOrder))
-                    .forEach(this::execute);
+            if (isAsync) {
+                final List<CompletableFuture<AsyncResultSet>> asyncResultSetCompletableFutureList = new ArrayList<>();
+                this.cassandraConfigs.getPreChangeLog()
+                        .getChangeSets()
+                        .stream()
+                        .sorted(Comparator.comparing(ChangeSet::getOrder))
+                        .forEach(changeSet -> {
+                            asyncResultSetCompletableFutureList.add(this.executeAsync(changeSet));
+                        });
+
+                CompletableFuture.allOf(asyncResultSetCompletableFutureList.toArray(new CompletableFuture[0])).join();
+                for (CompletableFuture<AsyncResultSet> asyncResultSetCompletableFuture : asyncResultSetCompletableFutureList) {
+                    try {
+                        asyncResultSetCompletableFuture.get();
+                    } catch (InterruptedException | ExecutionException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            } else {
+                this.cassandraConfigs.getPreChangeLog()
+                        .getChangeSets()
+                        .stream()
+                        .sorted(Comparator.comparing(ChangeSet::getOrder))
+                        .forEach(this::execute);
+            }
             log.info("Changelog Tables created.");
         } else {
             log.info("Changelog Tables already exists.");
@@ -143,12 +166,12 @@ public final class Cassandrabase implements Closeable {
         }
     }
 
-    public void validate() {
-        this.init();
+    public void validateInParallel() {
+        this.init(true);
         if (this.updated.get()) {
-            log.info("Start applying changes...");
+            log.info("Start applying changes in parallel...");
             if (Objects.nonNull(this.dynamicBeforeChangeLog)) {
-                this.saveChangeLog(this.dynamicBeforeChangeLog);
+                this.saveChangeLog(this.dynamicBeforeChangeLog,true);
             } else {
                 log.debug("No dynamic changeLog found for updating before static changeLog.");
             }
@@ -157,9 +180,9 @@ public final class Cassandrabase implements Closeable {
             } else {
                 log.debug("No runnable for updating before static changeLog.");
             }
-            this.saveChangeLog(this.cassandraConfigs.getChangeLog());
+            this.saveChangeLog(this.cassandraConfigs.getChangeLog(),true);
             if (Objects.nonNull(this.dynamiAfterChangeLog)) {
-                this.saveChangeLog(this.dynamiAfterChangeLog);
+                this.saveChangeLog(this.dynamiAfterChangeLog,true);
             } else {
                 log.debug("Not dynamic changeLog found for updating after static changeLog.");
             }
@@ -171,15 +194,72 @@ public final class Cassandrabase implements Closeable {
         }
     }
 
-    private void saveChangeLog(ChangeLog changeLog) {
-        changeLog.getChangeSets().stream().sorted(Comparator.comparing(ChangeSet::getOrder)).forEach(this::execute);
+    public void validate() {
+        this.init(false);
+        if (this.updated.get()) {
+            log.info("Start applying changes...");
+            if (Objects.nonNull(this.dynamicBeforeChangeLog)) {
+                this.saveChangeLog(this.dynamicBeforeChangeLog,false);
+            } else {
+                log.debug("No dynamic changeLog found for updating before static changeLog.");
+            }
+            if (Objects.nonNull(this.runnableBefore)) {
+                this.runnableBefore.run();
+            } else {
+                log.debug("No runnable for updating before static changeLog.");
+            }
+            this.saveChangeLog(this.cassandraConfigs.getChangeLog(),false);
+            if (Objects.nonNull(this.dynamiAfterChangeLog)) {
+                this.saveChangeLog(this.dynamiAfterChangeLog,false);
+            } else {
+                log.debug("Not dynamic changeLog found for updating after static changeLog.");
+            }
+            if (Objects.nonNull(this.runnableAfter)) {
+                this.runnableBefore.run();
+            } else {
+                log.debug("No runnable for updating after static changeLog.");
+            }
+        }
     }
+
+    private void saveChangeLog(ChangeLog changeLog, boolean async) {
+        if (async) {
+            this.saveChangeLogAsync(changeLog);
+        } else {
+            changeLog.getChangeSets().stream().sorted(Comparator.comparing(ChangeSet::getOrder)).forEach(this::execute);
+        }
+    }
+
+    private void saveChangeLogAsync(ChangeLog changeLog) {
+        final List<CompletableFuture<AsyncResultSet>> asyncResultSetCompletableFutureList = new ArrayList<>();
+
+        changeLog.getChangeSets().stream().sorted(Comparator.comparing(ChangeSet::getOrder))
+                .forEach(changeSet -> {
+                    asyncResultSetCompletableFutureList.add(executeAsync(changeSet));
+                });
+        CompletableFuture.allOf(asyncResultSetCompletableFutureList.toArray(new CompletableFuture[0])).join();
+        for (CompletableFuture<AsyncResultSet> asyncResultSetCompletableFuture : asyncResultSetCompletableFutureList) {
+            try {
+                asyncResultSetCompletableFuture.get();
+            } catch (InterruptedException | ExecutionException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
 
     private void execute(ChangeSet changeSet) {
         SimpleStatement simpleStatement = SimpleStatement.newInstance(changeSet.getStatement()).setConsistencyLevel(changeSet.getConsistencyLevel());
         log.info("Updating Change log. [ChangeLogId: {}, Author : {}, Order : {}, RowKey : {}]", changeSet.getId(), changeSet.getAuthor(), changeSet.getOrder(), changeSet.getMd5Sum());
         cqlSession.execute(simpleStatement);
     }
+
+    private CompletableFuture<AsyncResultSet> executeAsync(ChangeSet changeSet) {
+        SimpleStatement simpleStatement = SimpleStatement.newInstance(changeSet.getStatement()).setConsistencyLevel(changeSet.getConsistencyLevel());
+        log.info("Updating Change log asynchronously. [ChangeLogId: {}, Author : {}, Order : {}, RowKey : {}]", changeSet.getId(), changeSet.getAuthor(), changeSet.getOrder(), changeSet.getMd5Sum());
+        return this.cqlSession.executeAsync(simpleStatement).toCompletableFuture();
+    }
+
 
     private CassandraConfigs getPrimaryChangeLog() throws SAXException {
         try {
